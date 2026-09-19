@@ -14,8 +14,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build plugin
-        env:
+      - name: Check out engine build context
+        uses: actions/checkout@v4
+        with:
+          repository: matthewratcliffe/open-integration-engine
+          path: .ci-engine-source
+      - name: Build engine image
+        run: |
+          docker build \
+            --build-arg OIE_VERSION=4.6.0 \
+            --build-arg OIE_SHA256=7c82e79027e671277e1d78d0f7bbb1c53ddf1be476f1e80c2ddbfcf7855900ea \
+            --tag oie/engine:4.6.0 \
+            .ci-engine-source/docker
+      - name: Build plugin        env:
           PLUGIN_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '0.1.0' }}
         run: |
           chmod +x build.sh
