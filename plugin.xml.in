@@ -1,0 +1,22 @@
+<pluginMetaData path="keystore">
+    <name>Key Store</name>
+    <author>Matthew Ratcliffe</author>
+    <pluginVersion>@PLUGIN_VERSION@</pluginVersion>
+    <!--
+      Exact string match against the server version, split on commas. An
+      extension declaring anything else is refused outright by ExtensionLoader
+      and silently not loaded, so build.sh stamps this from MIRTH_VERSION.
+    -->
+    <mirthVersion>@MIRTH_VERSION@</mirthVersion>
+    <url>https://openintegrationengine.org</url>
+    <description>Reads credentials from Azure Key Vault, AWS Secrets Manager, 1Password Connect and Bitwarden Secrets Manager, and publishes them as variables channels can use: ${keystore.name} in any connector field, and a script API for transformers and deploy scripts. Values are held in memory only and refreshed on a timer, so a rotated secret reaches a running engine without a restart.</description>
+
+    <serverClasses>
+        <string>org.openintegrationengine.plugins.keystore.KeyStoreServicePlugin</string>
+    </serverClasses>
+
+    <library type="SERVER" path="libs/keystore-server.jar" />
+
+    <apiProvider type="SERVLET_INTERFACE" name="org.openintegrationengine.plugins.keystore.KeyStoreServletInterface" />
+    <apiProvider type="SERVER_CLASS" name="org.openintegrationengine.plugins.keystore.KeyStoreServlet" />
+</pluginMetaData>

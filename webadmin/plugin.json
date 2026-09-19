@@ -1,0 +1,10 @@
+{
+    "id": "keystore",
+    "name": "Key Store",
+    "version": "0.1.0",
+    "author": "Matthew Ratcliffe",
+    "description": "Credentials from Azure Key Vault, AWS Secrets Manager, 1Password Connect and Bitwarden Secrets Manager, published as ${keystore.name} variables for connector fields and scripts. A Key Store page lists every binding with its current state, and the nav item carries a count of the ones that are not resolving.",
+    "enabled": true,
+    "oie": { "apiMin": "4.6" },
+    "client": { "entry": "web/plugin.js" }
+}
