@@ -10,7 +10,9 @@
  * Nothing on this page ever displays a secret value: the API does not return
  * one. What it shows is the name, where it comes from, whether the last read
  * worked and how long the value is -- which is enough to tell a truncated paste
- * from a working credential without putting the credential on a screen.
+ * from a working credential without putting the credential on a screen. The
+ * secret tester is the one exception, and the server masks what it returns down
+ * to the first and last character before it leaves the engine.
  *
  * Plain ES module JavaScript: no JSX, no imports, no build step. The console
  * dynamically import()s this file and passes its own `platform` into
@@ -174,6 +176,23 @@ function ref(namespace, name) {
     return '${' + namespace + '.' + name + '}';
 }
 
+/**
+ * A secret read by name through a vault's direct references.
+ *
+ * Always brackets for the secret: its name is where the hyphens and slashes
+ * are, and the engine's Velocity rejects those after a dot -- and on that parse
+ * error leaves the whole field unreplaced, not just this reference. The field
+ * takes a dot when Velocity will accept one. Mirrors directPlaceholder() in
+ * KeyStoreService.
+ */
+function directRef(prefix, secretId, field) {
+    let out = '${' + prefix + "['" + secretId + "']";
+    if (field) {
+        out += /^[A-Za-z][A-Za-z0-9_]*$/.test(field) ? '.' + field : "['" + field + "']";
+    }
+    return out + '}';
+}
+
 function navLabel(boot) {
     if (!boot || boot.ok === false) return 'Key Store';
     const faults = Number(boot.faults) || 0;
@@ -333,6 +352,23 @@ function parseConnection(row) {
         organizationId: f[16] || '',
         hasCredential: f[17] === 'true',
         label: f[18] || '',
+        referencePrefix: f[19] || '',
+    };
+}
+
+/** One tab-separated row from the `direct` list in /status. */
+function parseDirect(row) {
+    const f = String(row).split('\t');
+    return {
+        prefix: f[0] || '',
+        secretId: f[1] || '',
+        state: f[2] || 'OK',
+        detail: f[3] || '',
+        valueAt: Number(f[4]) || 0,
+        checkedAt: Number(f[5]) || 0,
+        version: f[6] || '',
+        length: Number(f[7]) || 0,
+        placeholder: f[8] || '',
     };
 }
 
@@ -628,6 +664,9 @@ export function register(platform) {
         const [editingConnection, setEditingConnection] = React.useState(null);
         const [showSettings, setShowSettings] = React.useState(false);
         const [confirmDelete, setConfirmDelete] = React.useState(null);
+        // What the tester was last opened with, and a counter so opening it again
+        // from another binding starts a fresh tester rather than keeping old input.
+        const [testing, setTesting] = React.useState({ seq: 0, initial: {} });
 
         const load = React.useCallback(async (opts) => {
             const o = opts || {};
@@ -664,6 +703,7 @@ export function register(platform) {
 
         const namespace = (status && status.namespace) || 'keystore';
         const statuses = ((status && status.results) || []).map(parseStatus);
+        const directs = ((status && status.direct) || []).map(parseDirect);
         const statusFor = id => statuses.find(s => s.bindingId === id);
         const connectionFor = id => connections.find(c => c.id === id);
 
@@ -672,14 +712,41 @@ export function register(platform) {
             notice ? Banner('ok', notice, 'notice') : null,
 
             SecretsPanel(),
+            connections.length ? TestPanel() : null,
             VaultsPanel(),
             showSettings ? SettingsPanel() : null,
         ]);
 
         // --------------------------------------------------------------
+        function TestPanel() {
+            return h(SecretTester, {
+                key: 'tester-' + testing.seq,
+                initial: testing.initial,
+                connections,
+            });
+        }
+
+        /** Opens the tester on a binding's secret and brings it into view. */
+        function testBinding(binding) {
+            setTesting(t => ({
+                seq: t.seq + 1,
+                initial: {
+                    connectionId: binding.connectionId,
+                    secretId: binding.secretId,
+                    jsonField: binding.jsonField,
+                    version: binding.version,
+                    focus: true,
+                },
+            }));
+        }
+
+        // --------------------------------------------------------------
         function SecretsPanel() {
             const faults = statuses.filter(s =>
                 s.state === 'FAILED' || s.state === 'STALE' || s.state === 'UNAVAILABLE');
+            const directFaults = directs.filter(d => d.state !== 'OK');
+            const faultCount = faults.length + directFaults.length;
+            const prefixed = connections.filter(c => c.referencePrefix && c.enabled);
 
             return Panel('Secrets', [
                 h('div', { key: 'bar', style: { marginBottom: '9px' } }, [
@@ -721,8 +788,15 @@ export function register(platform) {
                         ? h('div', { key: 'empty', className: 'hint' },
                             'No secrets are bound yet. A binding gives a secret a name, and '
                             + 'channels use that name as ' + ref(namespace, 'name') + ' in any '
-                            + 'connector field.')
+                            + 'connector field.'
+                            + (prefixed.length
+                                ? ' Any secret can also be read by its own name, as '
+                                  + directRef(prefixed[0].referencePrefix, 'secret-name',
+                                      'field') + '.'
+                                : ''))
                         : BindingTable(),
+
+                directs.length ? DirectTable() : null,
 
                 editingBinding
                     ? h(BindingEditor, {
@@ -738,13 +812,48 @@ export function register(platform) {
                         },
                     })
                     : null,
-            ], { badge: faults.length
+            ], { badge: faultCount
                 ? h('span', { className: 'tag', style: {
                     background: 'color-mix(in srgb, var(--err) 18%, transparent)',
                     borderColor: 'color-mix(in srgb, var(--err) 55%, transparent)',
                     color: 'var(--err)',
-                } }, `${faults.length} not resolving`)
+                } }, `${faultCount} not resolving`)
                 : null });
+        }
+
+        /**
+         * Every name a channel has asked a vault for directly. There is no list of
+         * these to configure -- a name appears here the first time a connector
+         * field or script reads it -- so this is the only place a misspelt one
+         * shows up as anything other than a literal ${...} at the far end.
+         */
+        function DirectTable() {
+            return h('div', { key: 'direct', style: { marginTop: '11px' } }, [
+                h('div', { key: 't', className: 'hint', style: { marginBottom: '6px' } },
+                    'Read directly by name. These appear the first time a channel asks '
+                    + 'for them, and are re-read on the same schedule as the bindings.'),
+                h('table', { key: 'table', className: 'table' }, [
+                    h('thead', { key: 'h' }, h('tr', {}, [
+                        h('th', { key: 'a' }, 'Used in a channel as'),
+                        h('th', { key: 'b' }, 'State'),
+                    ])),
+                    h('tbody', { key: 'b' }, directs.map(d => h('tr', {
+                        key: d.prefix + '\u0000' + d.secretId,
+                    }, [
+                        h('td', { key: 'a' }, h(Placeholder, { text: d.placeholder })),
+                        h('td', { key: 'b' }, [
+                            StateChip(d.state),
+                            d.detail
+                                ? h('div', { key: 'x', className: 'hint' }, d.detail)
+                                : null,
+                            d.state === 'OK'
+                                ? h('div', { key: 'y', className: 'hint' },
+                                    `${d.length} characters, read ${since(d.valueAt)}`)
+                                : null,
+                        ]),
+                    ]))),
+                ]),
+            ]);
         }
 
         function BindingTable() {
@@ -798,6 +907,9 @@ export function register(platform) {
                         h('td', { key: 'e', style: { whiteSpace: 'nowrap' } }, [
                             Button('Edit', () => setEditingBinding(binding),
                                 { disabled: !!busy }),
+                            Button('Test', () => testBinding(binding),
+                                { disabled: !!busy,
+                                  title: 'Read it from the vault now, masked' }),
                             Button('Delete', () => setConfirmDelete({
                                 kind: 'binding', id: binding.id, name: binding.variable,
                             }), { danger: true, disabled: !!busy }),
@@ -838,6 +950,10 @@ export function register(platform) {
                                     connection.enabled ? null
                                         : h('div', { key: 'd', className: 'hint' },
                                             'Switched off'),
+                                    connection.referencePrefix
+                                        ? h('div', { key: 'r', className: 'hint mono' },
+                                            directRef(connection.referencePrefix, '…'))
+                                        : null,
                                 ]),
                                 h('td', { key: 'b' }, typeLabel(connection.type)),
                                 h('td', { key: 'c' }, [
@@ -1045,6 +1161,7 @@ export function register(platform) {
                 type: values.type,
                 authMode: values.authMode,
                 enabled: String(values.enabled !== false),
+                referencePrefix: values.referencePrefix || '',
             };
             for (const field of (FIELDS[type] || [])) {
                 if (field.secret) {
@@ -1128,6 +1245,18 @@ export function register(platform) {
                           span: !!field.secret || field.key === 'vaultUrl'
                             || field.key === 'connectUrl' })),
 
+                    Field('Direct reference name',
+                        Text(values.referencePrefix, v => set('referencePrefix', v),
+                            { placeholder: 'AWS' }),
+                        values.referencePrefix
+                            ? 'Any secret this identity can read is available by name as '
+                              + directRef(values.referencePrefix, 'prod/db', 'password')
+                              + ', with no binding. Leave empty to require a binding for '
+                              + 'every secret.'
+                            : 'Optional. Set a name such as AWS to let channels read any '
+                              + 'secret in this vault by its own name, without a binding.',
+                        { key: 'referencePrefix', span: true }),
+
                     Field('Enabled', Check(values.enabled !== false, 'Read from this vault',
                         v => set('enabled', v)),
                         'Switch off to stop reading from it without deleting it.'),
@@ -1144,6 +1273,117 @@ export function register(platform) {
                         style: { marginLeft: '6px' } }, busy + '…') : null,
                 ]),
             ]));
+    }
+
+    // ------------------------------------------------------------------
+    // The secret tester
+    // ------------------------------------------------------------------
+    /*
+     * Reads one secret from a saved vault and shows it masked: first and last
+     * character, asterisks between. The masking is done by the server, so the
+     * whole value never reaches this page. Short values come back as asterisks
+     * throughout, because for those the first and last character are most of it.
+     */
+    function SecretTester(props) {
+        const initial = props.initial || {};
+        const connections = props.connections;
+        const [connectionId, setConnectionId] = React.useState(initial.connectionId
+            || (connections.find(c => c.referencePrefix) || connections[0] || {}).id || '');
+        const [secretId, setSecretId] = React.useState(initial.secretId || '');
+        const [jsonField, setJsonField] = React.useState(initial.jsonField || '');
+        const [version, setVersion] = React.useState(initial.version || '');
+        const [busy, setBusy] = React.useState(false);
+        const [result, setResult] = React.useState(null);
+        const [error, setError] = React.useState(null);
+        const anchor = React.useRef(null);
+
+        const connection = connections.find(c => c.id === connectionId);
+        const type = connection ? connection.type : 'AWS_SECRETS_MANAGER';
+        const versionSupported = type === 'AZURE_KEY_VAULT' || type === 'AWS_SECRETS_MANAGER';
+
+        const test = async () => {
+            setBusy(true);
+            setError(null);
+            setResult(null);
+            try {
+                const r = await call('POST', '/secrets/_test', {
+                    connectionId, secretId, jsonField, version,
+                });
+                if (r.ok === false) {
+                    setError(problemText(r));
+                    return;
+                }
+                setResult(r);
+            } catch (err) {
+                setError(err.message);
+            } finally {
+                setBusy(false);
+            }
+        };
+
+        // Opened from a binding's Test button: scroll here and read at once,
+        // since everything needed has just been filled in.
+        React.useEffect(() => {
+            if (!initial.focus) return;
+            if (anchor.current && anchor.current.scrollIntoView) {
+                anchor.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            }
+            test();
+            // eslint-disable-next-line react-hooks/exhaustive-deps
+        }, []);
+
+        const fields = result
+            ? (Array.isArray(result.fields) ? result.fields
+                : (result.fields ? [result.fields] : []))
+            : [];
+
+        return h('div', { key: 'tester', ref: anchor }, Panel('Test a secret', [
+            h('div', { key: 'intro', className: 'hint', style: { marginBottom: '9px' } },
+                'Reads a secret from the vault now and shows its first and last character. '
+                + 'Nothing is saved, and channels are not affected.'),
+            error ? Banner('error', error, 'error') : null,
+            result ? Banner('ok', [
+                h('div', { key: 'm', className: 'mono', style: { fontSize: '13px' } },
+                    result.masked || '(empty)'),
+                h('div', { key: 'l' }, `${result.length} characters`
+                    + (result.version ? `, version ${result.version}` : '')),
+                fields.length
+                    ? h('div', { key: 'f' }, (jsonField ? 'Fields in this secret: '
+                        : 'This secret is a JSON object; pick a field to read one value. '
+                          + 'Fields: ') + fields.join(', '))
+                    : null,
+                result.note ? h('div', { key: 'n' }, result.note) : null,
+            ], 'result') : null,
+            result && result.placeholder
+                ? h('div', { key: 'ph', style: { marginBottom: '9px' } }, [
+                    h('span', { key: 'l', className: 'hint', style: { marginRight: '6px' } },
+                        'Use in a connector field as'),
+                    h(Placeholder, { key: 'p', text: result.placeholder }),
+                ])
+                : null,
+            h('div', { key: 'grid', className: 'form-grid' }, [
+                Field('Vault',
+                    Select(connectionId, connections.map(c => ({
+                        token: c.id, label: (c.name || c.label) + ' — ' + typeLabel(c.type)
+                            + (c.referencePrefix ? ' (' + c.referencePrefix + ')' : ''),
+                    })), setConnectionId), null, { key: 'v' }),
+                Field('Secret', Text(secretId, setSecretId,
+                    { placeholder: 'au-prod/htrak_postgres' }),
+                    SECRET_ID_HINT[type], { key: 's' }),
+                Field('Field within the secret',
+                    Text(jsonField, setJsonField, { placeholder: 'password' }),
+                    'Optional. For a JSON secret, the key to read. Empty means the whole '
+                    + 'value.', { key: 'f' }),
+                Field('Version', Text(version, setVersion, { disabled: !versionSupported }),
+                    VERSION_HINT[type], { key: 'ver' }),
+            ]),
+            h('div', { key: 'buttons', style: { marginTop: '9px' } }, [
+                Button('Test', test, { primary: true,
+                    disabled: busy || !connectionId || !secretId.trim() }),
+                busy ? h('span', { key: 'b', className: 'hint',
+                    style: { marginLeft: '6px' } }, 'Reading…') : null,
+            ]),
+        ], { key: 'tester-panel' }));
     }
 
     /** What each auth mode needs of the environment, said before it is chosen. */

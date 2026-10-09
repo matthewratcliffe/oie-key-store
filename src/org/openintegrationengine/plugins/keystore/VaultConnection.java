@@ -11,7 +11,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 /**
  * One configured vault: where it is, and how this engine proves who it is to it.
@@ -75,11 +77,24 @@ public final class VaultConnection {
         ACCESS_TOKEN
     }
 
+    /** What Velocity will accept as the name in front of {@code ['secret']}. */
+    private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z][A-Za-z0-9_]*");
+
+    /** Names the engine itself puts into a connector field's Velocity context. */
+    private static final Set<String> RESERVED_NAMES = Set.of("date", "DATE", "COUNT", "UUID",
+        "SYSTIME", "XmlUtil", "JsonUtil", "maps", "message", "channelName", "channelId",
+        "HASH");
+
     private String id = UUID.randomUUID().toString();
     private String name = "";
     private Type type = Type.AZURE_KEY_VAULT;
     private boolean enabled = true;
     private AuthMode authMode = AuthMode.CLIENT_SECRET;
+    /**
+     * The global map key any secret in this vault can be read through by name, as
+     * {@code ${AWS['prod/db'].password}}. Empty means off: every secret then needs a binding.
+     */
+    private String referencePrefix = "";
 
     // -- Azure ---------------------------------------------------------
 
@@ -223,6 +238,14 @@ public final class VaultConnection {
 
     public void setEnabled(boolean enabled) {
         this.enabled = enabled;
+    }
+
+    public String getReferencePrefix() {
+        return referencePrefix;
+    }
+
+    public void setReferencePrefix(String referencePrefix) {
+        this.referencePrefix = referencePrefix == null ? "" : referencePrefix.strip();
     }
 
     public AuthMode getAuthMode() {
@@ -402,6 +425,17 @@ public final class VaultConnection {
         if (name.isEmpty()) {
             out.add("Give the connection a name.");
         }
+        if (!referencePrefix.isEmpty()) {
+            if (!IDENTIFIER.matcher(referencePrefix).matches()) {
+                out.add("'" + referencePrefix + "' cannot be used as a reference name. Use "
+                    + "letters, digits and underscores, starting with a letter.");
+            } else if (RESERVED_NAMES.contains(referencePrefix)) {
+                // The engine puts these into every connector field's context itself, so
+                // a vault published under one would either be shadowed or shadow it.
+                out.add("'" + referencePrefix + "' is already used by the engine in "
+                    + "connector fields. Choose another reference name.");
+            }
+        }
         if (!authModesFor(type).contains(authMode)) {
             out.add(describeAuthMode(authMode) + " is not available for "
                 + describeType(type) + ".");
@@ -574,6 +608,7 @@ public final class VaultConnection {
         fields.put("type", type.name());
         fields.put("enabled", Boolean.toString(enabled));
         fields.put("authMode", authMode.name());
+        fields.put("referencePrefix", referencePrefix);
         fields.put("vaultUrl", vaultUrl);
         fields.put("tenantId", tenantId);
         fields.put("clientId", clientId);
@@ -636,6 +671,7 @@ public final class VaultConnection {
         c.type = parseEnum(Type.class, fields.get("type"), Type.AZURE_KEY_VAULT);
         c.enabled = !"false".equalsIgnoreCase(fields.getOrDefault("enabled", "true"));
         c.authMode = parseEnum(AuthMode.class, fields.get("authMode"), defaultAuthMode(c.type));
+        c.setReferencePrefix(fields.getOrDefault("referencePrefix", ""));
         c.setVaultUrl(fields.getOrDefault("vaultUrl", ""));
         c.setTenantId(fields.getOrDefault("tenantId", ""));
         c.setClientId(fields.getOrDefault("clientId", ""));

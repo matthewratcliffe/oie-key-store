@@ -127,6 +127,15 @@ public class KeyStoreServlet extends MirthServlet implements KeyStoreServletInte
     }
 
     @Override
+    public Map<String, Object> testSecret(Map<String, String> secret) {
+        try {
+            return service().testSecret(secret);
+        } catch (Exception e) {
+            return failure(e);
+        }
+    }
+
+    @Override
     public Map<String, Object> getBindings() {
         try {
             return service().bindings();

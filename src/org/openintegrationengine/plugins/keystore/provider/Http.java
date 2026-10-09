@@ -96,7 +96,11 @@ public final class Http {
         HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(url)).timeout(timeout);
         if (headers != null) {
             for (Map.Entry<String, String> e : headers.entrySet()) {
-                if (e.getValue() != null) {
+                // Host is skipped, not sent. The JDK client refuses to have it set --
+                // "restricted header name" -- and writes it itself from the URL, which is
+                // the value AwsV4Signer signs. The signer hands it back with the others
+                // so the full signed set is visible; this is where it is dropped.
+                if (e.getValue() != null && !"host".equalsIgnoreCase(e.getKey())) {
                     b.header(e.getKey(), e.getValue());
                 }
             }

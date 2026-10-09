@@ -137,6 +137,18 @@ public final class SecretResolver {
     private volatile List<Status> lastPass = List.of();
     private volatile long lastPassAt;
 
+    /**
+     * Each vault's direct references, by connection id.
+     *
+     * <p>Kept across passes rather than rebuilt, because each one holds the cache of names
+     * channels have asked for. Rebuilding would empty it, and the next message through every
+     * channel would wait on a vault call.
+     */
+    private final Map<String, DirectReferences> direct = new ConcurrentHashMap<>();
+
+    /** Exactly which direct references were last put into the global map, by key. */
+    private volatile Map<String, DirectReferences> lastDirectPublished = Map.of();
+
     public SecretResolver() {
         providers.put(VaultConnection.Type.AZURE_KEY_VAULT, new AzureKeyVaultProvider());
         providers.put(VaultConnection.Type.AWS_SECRETS_MANAGER, new AwsSecretsManagerProvider());
@@ -259,6 +271,7 @@ public final class SecretResolver {
         }
 
         publish(published);
+        publishDirect(syncDirect(connections.values(), staleAllowed));
         lastPass = List.copyOf(statuses);
         lastPassAt = now;
         return lastPass;
@@ -283,22 +296,31 @@ public final class SecretResolver {
         SecretProvider.Secret secret =
             provider.fetch(connection, binding.getSecretId(), binding.getVersion());
         lastVersion = secret.version;
+        return extract(binding.getSecretId(), secret.value, binding.getJsonField());
+    }
 
-        String field = binding.getJsonField();
-        if (field.isEmpty()) {
-            return secret.value;
+    /**
+     * Takes one field out of a secret's payload, or the whole payload when none is named.
+     *
+     * <p>A missing field is an error, not the whole payload: silently handing back a JSON
+     * document as a password is far worse than saying which fields there are.
+     */
+    static String extract(String secretId, String payload, String field)
+            throws SecretProvider.VaultException {
+        if (field == null || field.isEmpty()) {
+            return payload;
         }
         String extracted;
         try {
-            extracted = Json.field(secret.value, field);
+            extracted = Json.field(payload, field);
         } catch (IOException e) {
-            throw new SecretProvider.VaultException("'" + binding.getSecretId()
+            throw new SecretProvider.VaultException("'" + secretId
                 + "' is not a JSON document, so the field '" + field
                 + "' cannot be taken out of it.", e);
         }
         if (extracted == null) {
-            List<String> names = Json.fieldNames(secret.value);
-            throw new SecretProvider.VaultException("'" + binding.getSecretId()
+            List<String> names = Json.fieldNames(payload);
+            throw new SecretProvider.VaultException("'" + secretId
                 + "' has no field '" + field + "'."
                 + (names.isEmpty() ? " It is not a JSON object."
                     : " It has: " + String.join(", ", names) + "."));
@@ -323,7 +345,7 @@ public final class SecretResolver {
      * a bare {@code NullPointerException} reaching the console as an empty string is
      * worse than the class name.
      */
-    private static String describe(Exception e) {
+    static String describe(Exception e) {
         String message = e.getMessage();
         if (message != null && !message.isBlank()) {
             return message;
@@ -373,6 +395,7 @@ public final class SecretResolver {
      * was already built.
      */
     public void republish() {
+        republishDirect();
         Map<String, String> snapshot = lastPublished;
         if (snapshot.isEmpty()) {
             return;
@@ -395,8 +418,13 @@ public final class SecretResolver {
     /** Removes the published map entirely, and forgets every held value. On shutdown. */
     public void unpublish() {
         unpublish(KeyStoreStore.namespace());
+        for (String prefix : lastDirectPublished.keySet()) {
+            unpublish(prefix);
+        }
         held.clear();
+        direct.clear();
         lastPublished = Map.of();
+        lastDirectPublished = Map.of();
         lastPass = List.of();
     }
 
@@ -431,6 +459,115 @@ public final class SecretResolver {
             }
         }
         return null;
+    }
+
+    // ------------------------------------------------------------------
+    // Direct references
+    // ------------------------------------------------------------------
+
+    /**
+     * Brings the direct references in line with the vaults, and re-reads what they hold.
+     *
+     * @return what should now be published, by global map key
+     */
+    private Map<String, DirectReferences> syncDirect(Iterable<VaultConnection> connections,
+                                                     boolean staleAllowed) {
+        String namespace = KeyStoreStore.namespace();
+        Map<String, DirectReferences> next = new LinkedHashMap<>();
+        Map<String, DirectReferences> keep = new LinkedHashMap<>();
+
+        for (VaultConnection connection : connections) {
+            String prefix = connection.getReferencePrefix();
+            if (!connection.isEnabled() || prefix.isEmpty()) {
+                continue;
+            }
+            // Checked here as well as when saving, because the namespace can be changed
+            // afterwards to collide, and two things under one key means one of them
+            // silently stops resolving.
+            if (prefix.equals(namespace) || next.containsKey(prefix)) {
+                LOG.warn("key store: '{}' cannot publish direct references as ${}[...]; that "
+                    + "name is already in use", connection.label(), prefix);
+                continue;
+            }
+            SecretProvider provider = providers.get(connection.getType());
+            if (provider == null) {
+                continue;
+            }
+            DirectReferences refs = direct.get(connection.getId());
+            if (refs == null || !refs.prefix().equals(prefix)) {
+                refs = new DirectReferences(connection, provider);
+            } else {
+                refs.use(connection);
+            }
+            refs.refresh(staleAllowed);
+            next.put(prefix, refs);
+            keep.put(connection.getId(), refs);
+        }
+
+        direct.keySet().retainAll(keep.keySet());
+        direct.putAll(keep);
+        return next;
+    }
+
+    /** Puts each vault's direct references into the global map, and removes stale keys. */
+    private void publishDirect(Map<String, DirectReferences> next) {
+        Map<String, DirectReferences> previous = lastDirectPublished;
+        lastDirectPublished = Map.copyOf(next);
+        try {
+            GlobalVariableStore store = GlobalVariableStore.getInstance();
+            for (Map.Entry<String, DirectReferences> e : previous.entrySet()) {
+                // Only removed if it is still ours. A script may since have put something
+                // of its own under the name, and that is not this plugin's to delete.
+                if (!next.containsKey(e.getKey()) && store.get(e.getKey()) == e.getValue()) {
+                    store.remove(e.getKey());
+                }
+            }
+            for (Map.Entry<String, DirectReferences> e : next.entrySet()) {
+                if (store.get(e.getKey()) != e.getValue()) {
+                    store.put(e.getKey(), e.getValue());
+                }
+            }
+        } catch (Exception e) {
+            LOG.error("key store: could not publish direct references into the global map", e);
+        }
+    }
+
+    /** The direct-reference half of {@link #republish()}. Same rules: cheap, never throws. */
+    private void republishDirect() {
+        Map<String, DirectReferences> snapshot = lastDirectPublished;
+        if (snapshot.isEmpty()) {
+            return;
+        }
+        try {
+            GlobalVariableStore store = GlobalVariableStore.getInstance();
+            for (Map.Entry<String, DirectReferences> e : snapshot.entrySet()) {
+                if (store.get(e.getKey()) != e.getValue()) {
+                    store.put(e.getKey(), e.getValue());
+                }
+            }
+        } catch (Exception e) {
+            LOG.error("key store: could not republish direct references into the global map",
+                e);
+        }
+    }
+
+    /**
+     * One secret through a vault's direct references, for the script API.
+     *
+     * @return the secret, or null when there is no such reference name or it cannot be read
+     */
+    public SecretValue lookup(String prefix, String secretId) {
+        DirectReferences refs = prefix == null ? null : lastDirectPublished.get(prefix.strip());
+        return refs == null ? null : refs.get(secretId);
+    }
+
+    /** Every name looked up through a direct reference, for the console. */
+    public List<DirectReferences.Status> directStatuses() {
+        List<DirectReferences.Status> out = new ArrayList<>();
+        for (DirectReferences refs : lastDirectPublished.values()) {
+            out.addAll(refs.statuses());
+        }
+        return out;
     }
 
     /** The variable names that currently have a value. Names only. */

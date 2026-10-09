@@ -3,8 +3,9 @@
  * a browser or a React runtime.
  *
  * Copied rather than imported, the same arrangement the Backup / Git Sync /
- * Volume Monitor extensions use. decode/decodeEntry/encodeMap/ref/navLabel/
- * parseStatus/parseConnection/parseBinding/typeLabel and the TYPES table are
+ * Volume Monitor extensions use. decode/decodeEntry/encodeMap/ref/directRef/
+ * navLabel/parseStatus/parseConnection/parseDirect/parseBinding/typeLabel and
+ * the TYPES table are
  * copied verbatim; problemText and authModeHint are lifted out of register()'s
  * closure unchanged. since() reads Date.now() in plugin.js; here it takes an
  * injected `now` so the thresholds are deterministic under test.
@@ -91,6 +92,14 @@ export function ref(namespace, name) {
     return '${' + namespace + '.' + name + '}';
 }
 
+export function directRef(prefix, secretId, field) {
+    let out = '${' + prefix + "['" + secretId + "']";
+    if (field) {
+        out += /^[A-Za-z][A-Za-z0-9_]*$/.test(field) ? '.' + field : "['" + field + "']";
+    }
+    return out + '}';
+}
+
 export function navLabel(boot) {
     if (!boot || boot.ok === false) return 'Key Store';
     const faults = Number(boot.faults) || 0;
@@ -143,6 +152,22 @@ export function parseConnection(row) {
         organizationId: f[16] || '',
         hasCredential: f[17] === 'true',
         label: f[18] || '',
+        referencePrefix: f[19] || '',
+    };
+}
+
+export function parseDirect(row) {
+    const f = String(row).split('	');
+    return {
+        prefix: f[0] || '',
+        secretId: f[1] || '',
+        state: f[2] || 'OK',
+        detail: f[3] || '',
+        valueAt: Number(f[4]) || 0,
+        checkedAt: Number(f[5]) || 0,
+        version: f[6] || '',
+        length: Number(f[7]) || 0,
+        placeholder: f[8] || '',
     };
 }
 

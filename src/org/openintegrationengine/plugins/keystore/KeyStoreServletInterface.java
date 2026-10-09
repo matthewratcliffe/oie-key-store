@@ -26,7 +26,8 @@ import java.util.Map;
  * inside one is a list of tab-separated strings -- see the note on {@link KeyStoreService}
  * for why that is not just laziness.
  *
- * <p>No response carries a secret value or a stored credential. The write operations are
+ * <p>No response carries a secret value or a stored credential, except
+ * {@code /secrets/_test}, which returns one masked to its first and last character. The write operations are
  * audited ({@code auditable} is left at its default) because entering a vault credential is
  * exactly the kind of change that should appear in the engine's event log with a user
  * against it; the read operations are not, because the console polls them.
@@ -137,6 +138,25 @@ public interface KeyStoreServletInterface extends BaseServletInterface {
         @io.swagger.v3.oas.annotations.Parameter(description =
             "Connection fields to test, saved or not.", required = true)
         Map<String, String> connection) throws ClientException;
+
+    /**
+     * Reads one secret from a saved vault and returns it masked to its first and last
+     * character.
+     *
+     * <p>Audited, unlike the other reads: it is the one call that returns any part of a
+     * value, so who looked at what belongs in the event log.
+     */
+    @POST
+    @Path("/secrets/_test")
+    @io.swagger.v3.oas.annotations.Operation(summary = "Read one secret, masked.")
+    @MirthOperation(name = "keyStoreTestSecret", display = "Test reading a secret",
+        type = Operation.ExecuteType.ASYNC)
+    Map<String, Object> testSecret(
+        @Param("secret")
+        @io.swagger.v3.oas.annotations.Parameter(description =
+            "connectionId and secretId, and optionally jsonField and version.",
+            required = true)
+        Map<String, String> secret) throws ClientException;
 
     // ------------------------------------------------------------------
     // Bindings

@@ -53,6 +53,62 @@ nobody.
 globalMap.get('keystore').get('partnerApiToken');
 ```
 
+### Any secret by name, without a binding
+
+Give a vault a **direct reference name** in its editor -- `AWS`, say -- and any
+secret that vault's identity can read is available by its own name, no binding
+needed:
+
+```
+${AWS['au-prod/htrak_postgres'].password}      one field of a JSON secret
+${AWS['au-prod/htrak_postgres']['db-host']}    a field whose name has a hyphen
+${AWS['prod/partner-token']}                   a plain-text secret, whole
+```
+
+The secret's name goes in brackets and quotes. That is not optional:
+`${AWS.au-prod/htrak_postgres.password}` is a syntax error to the engine's
+template parser, because a hyphen or slash cannot appear after a dot -- and on a
+syntax error the engine leaves the **whole field** unreplaced, every other
+`${...}` in it included. The field name can follow a dot when it is letters,
+digits and underscores; otherwise it goes in brackets too. The secret tester
+below writes the placeholder for you.
+
+A name is read the first time a channel uses it, then cached and re-read on the
+same schedule as the bindings, so rotation and the stale-value setting behave
+the same way. A name that cannot be read leaves the literal `${...}` in place and
+is retried at most once a minute, so a misspelt name does not become a vault call
+per message. Every name channels have asked for is listed on the Key Store page
+with its state, and a failing one counts towards the fault badge.
+
+In a script:
+
+```javascript
+var KeyStore = org.openintegrationengine.plugins.keystore.Secrets;
+var password = KeyStore.lookup('AWS', 'au-prod/htrak_postgres', 'password');
+var token    = KeyStore.lookup('AWS', 'prod/partner-token');   // whole value
+```
+
+Direct references always read the current version. **The trade:** with a
+reference name set, any channel can read any secret the vault's identity can
+read, by naming it. Bindings put an administrator between a channel and a
+secret; this does not. Scope the identity's policy to the secrets this engine
+should have -- `secretsmanager:GetSecretValue` on `arn:...:secret:au-prod/*`
+rather than `*` -- or leave the reference name empty and use bindings.
+
+### Testing a secret
+
+**Test a secret** on the Key Store page reads one secret from a saved vault and
+shows its **first and last character**, asterisks between -- enough to tell the
+right secret from a stale or truncated one without putting it on a screen. The
+masking is done in the engine, so the whole value never reaches the browser.
+Values shorter than five characters are asterisks throughout, since for those the
+first and last character are most of the value. It also lists the fields of a
+JSON secret (names only) and, for a vault with a reference name, the placeholder
+to paste. Each binding has a **Test** button that fills it in.
+
+Nothing is cached or published by a test, and it is recorded in the engine's
+event log against the user who ran it.
+
 ### One place `${...}` does not work
 
 The **global deploy script** — the server-wide one, not a channel's. On a
@@ -185,6 +241,12 @@ channels keep working through a vault outage. Switch it off where a revoked
 secret must stop being usable within one refresh interval, and accept that a
 vault outage then stops the channels that depend on it.
 
+**Direct reference name** (per vault) — see
+[Any secret by name](#any-secret-by-name-without-a-binding). Letters, digits and
+underscores, starting with a letter; it cannot be the variable prefix, another
+vault's reference name, or a name the engine itself puts into connector fields
+(`date`, `message`, `UUID` and the like).
+
 **Event log** — writes a warning into the engine's own event log when a secret
 cannot be read at all, where alerts can see it. Stale values are logged to the
 server log but do not raise an event: nothing has stopped working, and an event
@@ -218,10 +280,13 @@ What the plugin does guarantee:
   encryptor is keyed from `appdata/keystore.jks`, which is a different volume
   from the database in this stack. **Back up both**, or a restore leaves you
   re-entering every credential.
-- **No API response carries a secret value or a stored credential.** The console
-  shows the name, the vault, whether the last read worked and how many characters
-  the value has — enough to spot a truncated paste without putting the credential
-  on a screen.
+- **No API response carries a secret value or a stored credential**, with one
+  exception: the secret tester returns a value masked to its first and last
+  character. Otherwise the console shows the name, the vault, whether the last
+  read worked and how many characters the value has — enough to spot a truncated
+  paste without putting the credential on a screen.
+- **A direct-reference map cannot be listed.** `globalMap.get('AWS')` answers a
+  name it is given and nothing else; printing or iterating it shows an empty map.
 - **Nothing is logged.** Failures name the variable and the secret, never the
   value.
 - A credential field left blank when editing a vault **keeps the stored one**.

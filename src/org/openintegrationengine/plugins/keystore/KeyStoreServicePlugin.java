@@ -252,6 +252,7 @@ public class KeyStoreServicePlugin implements ServicePlugin, ChannelPlugin {
                     "keyStoreStatus", "keyStoreSummary",
                     "keyStoreGetConnections", "keyStoreSaveConnection",
                     "keyStoreDeleteConnection", "keyStoreTestConnection",
+                    "keyStoreTestSecret",
                     "keyStoreGetBindings", "keyStoreSaveBinding", "keyStoreDeleteBinding",
                     "keyStoreRefresh", "keyStoreSetSettings"
                 },

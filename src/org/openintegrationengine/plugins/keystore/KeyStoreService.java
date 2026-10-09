@@ -5,6 +5,7 @@ package org.openintegrationengine.plugins.keystore;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.openintegrationengine.plugins.keystore.provider.Json;
 import org.openintegrationengine.plugins.keystore.provider.SecretProvider;
 
 import java.util.ArrayList;
@@ -25,7 +26,8 @@ import java.util.Map;
  *
  * <p><b>No method here returns a secret value, and none returns a stored credential.</b>
  * The console shows what a binding is called, where it comes from, whether it resolved and
- * how long the value is -- never the value. A credential field arrives from the browser
+ * how long the value is -- never the value. The one exception is {@link #testSecret}, which
+ * returns a value masked down to its first and last character. A credential field arrives from the browser
  * and never goes back to it, which is also what lets a blank field mean "leave the stored
  * one alone" when a connection is edited.
  */
@@ -95,6 +97,23 @@ public final class KeyStoreService {
                 "${" + namespace + "." + flat(s.variable) + "}"));
         }
 
+        List<String> direct = new ArrayList<>();
+        for (DirectReferences.Status s : resolver.directStatuses()) {
+            if (s.isFault()) {
+                faults++;
+            }
+            direct.add(String.join("\t",
+                flat(s.prefix),
+                flat(s.secretId),
+                s.state.name(),
+                flat(s.detail),
+                Long.toString(s.valueAt),
+                Long.toString(s.checkedAt),
+                flat(s.version),
+                Integer.toString(s.length),
+                flat(directPlaceholder(s.prefix, s.secretId, ""))));
+        }
+
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("ok", Boolean.TRUE);
         out.put("faults", faults);
@@ -106,20 +125,31 @@ public final class KeyStoreService {
         out.put("serveStaleOnFailure", KeyStoreStore.serveStaleOnFailure());
         out.put("writeServerEvents", KeyStoreStore.writeServerEvents());
         out.put("results", rows);
+        out.put("direct", direct);
         return out;
     }
 
-    /** Just the fault count, for the navigation badge. Cheap: reads no vault. */
-    public Map<String, Object> summary() {
+    /** Faults across bindings and direct references, which the badge counts together. */
+    private int faults(List<SecretResolver.Status> results) {
         int faults = 0;
-        for (SecretResolver.Status s : resolver.getLastPass()) {
+        for (SecretResolver.Status s : results) {
             if (s.isFault()) {
                 faults++;
             }
         }
+        for (DirectReferences.Status s : resolver.directStatuses()) {
+            if (s.isFault()) {
+                faults++;
+            }
+        }
+        return faults;
+    }
+
+    /** Just the fault count, for the navigation badge. Cheap: reads no vault. */
+    public Map<String, Object> summary() {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("ok", Boolean.TRUE);
-        out.put("faults", faults);
+        out.put("faults", faults(resolver.getLastPass()));
         out.put("bindingCount", KeyStoreStore.bindings().size());
         out.put("lastPassAt", resolver.getLastPassAt());
         return out;
@@ -128,16 +158,10 @@ public final class KeyStoreService {
     /** Reads every binding from its vault now. */
     public Map<String, Object> refresh() {
         List<SecretResolver.Status> results = resolver.refresh();
-        int faults = 0;
-        for (SecretResolver.Status s : results) {
-            if (s.isFault()) {
-                faults++;
-            }
-        }
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("ok", Boolean.TRUE);
         out.put("refreshed", results.size());
-        out.put("faults", faults);
+        out.put("faults", faults(results));
         return out;
     }
 
@@ -183,7 +207,8 @@ public final class KeyStoreService {
             flat(c.getApiUrl()),
             flat(c.getOrganizationId()),
             Boolean.toString(hasStoredCredential(c)),
-            flat(c.label()));
+            flat(c.label()),
+            flat(c.getReferencePrefix()));
     }
 
     private static boolean hasStoredCredential(VaultConnection c) {
@@ -224,6 +249,23 @@ public final class KeyStoreService {
         applyTo(connection, fields);
 
         List<String> problems = new ArrayList<>(connection.problems());
+        String prefix = connection.getReferencePrefix();
+        if (!prefix.isEmpty()) {
+            // One global map key can hold one thing. A second vault under the same name, or
+            // the bindings' own namespace, would make one of the two stop resolving.
+            if (prefix.equals(KeyStoreStore.namespace())) {
+                problems.add("'" + prefix + "' is the variable prefix bindings are published "
+                    + "under. Choose another reference name.");
+            }
+            for (VaultConnection other : KeyStoreStore.connections()) {
+                if (!other.getId().equals(connection.getId())
+                    && prefix.equals(other.getReferencePrefix())) {
+                    problems.add("The vault '" + other.label() + "' already uses the "
+                        + "reference name '" + prefix + "'.");
+                    break;
+                }
+            }
+        }
         // A warning is not a refusal. The one warning that exists -- a plain-http Connect
         // server -- describes a deployment people really do run, and refusing it would
         // make the plugin unusable for them rather than informed.
@@ -240,6 +282,9 @@ public final class KeyStoreService {
         // a corrected credential is used on the next call rather than whenever the old
         // token happened to expire -- which otherwise looks like the fix not having saved.
         resolver.forget(connection.getId());
+        // Publishes, moves or withdraws its direct references now rather than at the next
+        // scheduled pass, so a reference name that was just set works when it is tried.
+        resolver.refresh();
 
         LOG.info("key store connection '{}' saved: {} via {}", connection.label(),
             VaultConnection.describeType(connection.getType()),
@@ -274,6 +319,9 @@ public final class KeyStoreService {
         }
         if (fields.containsKey("enabled")) {
             connection.setEnabled(Boolean.parseBoolean(fields.get("enabled")));
+        }
+        if (fields.containsKey("referencePrefix")) {
+            connection.setReferencePrefix(fields.get("referencePrefix"));
         }
         if (fields.containsKey("vaultUrl")) {
             connection.setVaultUrl(fields.get("vaultUrl"));
@@ -418,6 +466,120 @@ public final class KeyStoreService {
                 ? e.getClass().getSimpleName() : message);
         }
         return out;
+    }
+
+    // ------------------------------------------------------------------
+    // Testing one secret
+    // ------------------------------------------------------------------
+
+    /**
+     * Reads one secret from a saved vault and reports it masked.
+     *
+     * <p>The one place a response carries anything of a value: its first and last
+     * character, with everything between replaced by asterisks -- enough to tell the right
+     * secret from a stale or truncated one, which a length alone cannot. The masking happens
+     * here, so the whole value never reaches the browser.
+     *
+     * <p>Reads the vault directly rather than through the cache, so it answers "what is in
+     * the vault now", and it changes nothing that channels see.
+     */
+    public Map<String, Object> testSecret(Map<String, String> incoming) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        Map<String, String> fields = incoming == null ? Map.of() : incoming;
+        String connectionId = strip(fields.get("connectionId"));
+        String secretId = strip(fields.get("secretId"));
+        String field = strip(fields.get("jsonField"));
+        String version = strip(fields.get("version"));
+
+        VaultConnection connection = KeyStoreStore.connection(connectionId);
+        if (connection == null) {
+            out.put("ok", Boolean.FALSE);
+            out.put("error", connectionId.isEmpty() ? "Choose a vault."
+                : "That vault no longer exists; it may have been deleted.");
+            return out;
+        }
+        if (secretId.isEmpty()) {
+            out.put("ok", Boolean.FALSE);
+            out.put("error", "Name the secret to read.");
+            return out;
+        }
+        SecretProvider provider = resolver.provider(connection.getType());
+        if (provider == null) {
+            out.put("ok", Boolean.FALSE);
+            out.put("error", "No provider is available for "
+                + VaultConnection.describeType(connection.getType()) + ".");
+            return out;
+        }
+
+        try {
+            SecretProvider.Secret secret = provider.fetch(connection, secretId, version);
+            String value = SecretResolver.extract(secretId, secret.value, field);
+            LOG.info("key store: secret '{}' in '{}' was test-read{}", secretId,
+                connection.label(), field.isEmpty() ? "" : " (field '" + field + "')");
+
+            out.put("ok", Boolean.TRUE);
+            out.put("masked", mask(value));
+            out.put("length", value.length());
+            out.put("version", secret.version);
+            // Field names, never their values: the answer to "which key did I mean".
+            out.put("fields", new ArrayList<>(Json.fieldNames(secret.value)));
+            String prefix = connection.isEnabled() ? connection.getReferencePrefix() : "";
+            out.put("placeholder", prefix.isEmpty() ? ""
+                : directPlaceholder(prefix, secretId, field));
+            if (!version.isEmpty() && !prefix.isEmpty()) {
+                out.put("note", "A direct reference always reads the current version.");
+            }
+        } catch (Exception e) {
+            out.put("ok", Boolean.FALSE);
+            out.put("error", SecretResolver.describe(e));
+        }
+        return out;
+    }
+
+    /**
+     * The first and last character, and an asterisk for each one between.
+     *
+     * <p>Counted in code points, so a character outside the basic plane is not split into
+     * half a surrogate pair. Anything shorter than five characters is asterisks throughout:
+     * for those, the first and last character are most or all of the value.
+     */
+    public static String mask(String value) {
+        if (value == null || value.isEmpty()) {
+            return "";
+        }
+        int[] points = value.codePoints().toArray();
+        if (points.length < 5) {
+            return "*".repeat(points.length);
+        }
+        return new StringBuilder()
+            .appendCodePoint(points[0])
+            .append("*".repeat(points.length - 2))
+            .appendCodePoint(points[points.length - 1])
+            .toString();
+    }
+
+    /**
+     * How a secret is written in a connector field through a direct reference.
+     *
+     * <p>Always the bracket form for the secret, because a secret's name is where the
+     * hyphens and slashes are and Velocity rejects those after a dot. The field uses a dot
+     * when Velocity will take it and brackets when it will not.
+     */
+    static String directPlaceholder(String prefix, String secretId, String field) {
+        StringBuilder sb = new StringBuilder("${").append(prefix)
+            .append("['").append(secretId).append("']");
+        if (field != null && !field.isEmpty()) {
+            if (field.matches("[A-Za-z][A-Za-z0-9_]*")) {
+                sb.append('.').append(field);
+            } else {
+                sb.append("['").append(field).append("']");
+            }
+        }
+        return sb.append('}').toString();
+    }
+
+    private static String strip(String s) {
+        return s == null ? "" : s.strip();
     }
 
     // ------------------------------------------------------------------

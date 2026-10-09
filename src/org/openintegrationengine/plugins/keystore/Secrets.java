@@ -72,6 +72,32 @@ public final class Secrets {
         return value;
     }
 
+    /**
+     * A secret read by name through a vault's direct references, with no binding.
+     *
+     * <pre>
+     * var password = KeyStore.lookup('AWS', 'au-prod/htrak_postgres', 'password');
+     * </pre>
+     *
+     * @param prefix   the vault's reference name, as set in its editor
+     * @param secretId the secret's name in that vault
+     * @param field    a field of a JSON secret, or null or empty for the whole value
+     * @return the value, or null when it cannot be read or has no such field
+     */
+    public static String lookup(String prefix, String secretId, String field) {
+        SecretResolver resolver = resolver();
+        SecretValue secret = resolver == null ? null : resolver.lookup(prefix, secretId);
+        if (secret == null) {
+            return null;
+        }
+        return field == null || field.isEmpty() ? secret.raw() : secret.get(field);
+    }
+
+    /** The whole of a secret read through a direct reference. */
+    public static String lookup(String prefix, String secretId) {
+        return lookup(prefix, secretId, null);
+    }
+
     /** Whether a variable currently has a value. */
     public static boolean has(String variable) {
         return get(variable) != null;

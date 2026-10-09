@@ -2,13 +2,34 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     ref, navLabel, parseStatus, parseConnection, parseBinding,
-    typeLabel, since, problemText, authModeHint, encodeMap,
+    typeLabel, since, problemText, authModeHint, encodeMap, directRef, parseDirect,
 } from './logic.mjs';
 
 test('ref builds a Velocity placeholder by concatenation', () => {
     assert.equal(ref('keystore', 'tok'), '${keystore.tok}');
     assert.equal(ref('', 'x'), '${.x}');
     assert.equal(ref('ns', ''), '${ns.}');
+});
+
+test('directRef brackets the secret name and dots a plain field', () => {
+    assert.equal(directRef('AWS', 'au-prod/htrak_postgres', 'password'),
+        "${AWS['au-prod/htrak_postgres'].password}");
+    // A field Velocity will not take after a dot goes in brackets too.
+    assert.equal(directRef('AWS', 'x', 'db-host'), "${AWS['x']['db-host']}");
+    assert.equal(directRef('AWS', 'plain/token'), "${AWS['plain/token']}");
+    assert.equal(directRef('AWS', 'plain/token', ''), "${AWS['plain/token']}");
+});
+
+test('parseDirect splits a direct-reference status row', () => {
+    const d = parseDirect(['AWS', 'au-prod/db', 'STALE', 'down', '1000', '2000', 'v1', '12',
+        "${AWS['au-prod/db']}"].join('	'));
+    assert.equal(d.prefix, 'AWS');
+    assert.equal(d.secretId, 'au-prod/db');
+    assert.equal(d.state, 'STALE');
+    assert.equal(d.valueAt, 1000);
+    assert.equal(d.length, 12);
+    assert.equal(d.placeholder, "${AWS['au-prod/db']}");
+    assert.equal(parseDirect('').state, 'OK');
 });
 
 test('navLabel carries the fault count only when positive', () => {
@@ -46,6 +67,10 @@ test('parseConnection defaults enabled=true and reads hasCredential flag', () =>
     assert.equal(c.hasCredential, false);     // f[17] absent
     const disabled = parseConnection(['c1', 'X', 'AZURE_KEY_VAULT', 'CLIENT_SECRET', 'false'].join('\t'));
     assert.equal(disabled.enabled, false);
+    assert.equal(c.referencePrefix, '');      // f[19] absent: no direct references
+    const f = Array(20).fill('');
+    f[19] = 'AWS';
+    assert.equal(parseConnection(f.join('	')).referencePrefix, 'AWS');
     // type defaults to AZURE_KEY_VAULT on an empty row.
     assert.equal(parseConnection('').type, 'AZURE_KEY_VAULT');
 });
