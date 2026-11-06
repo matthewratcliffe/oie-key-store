@@ -106,6 +106,11 @@ first and last character are most of the value. It also lists the fields of a
 JSON secret (names only) and, for a vault with a reference name, the placeholder
 to paste. Each binding has a **Test** button that fills it in.
 
+A test reads the vault directly, so it passes whether or not channels can see the
+secret. When they cannot -- the vault has no reference name, or is switched off --
+the result says so, rather than leaving a passing test to suggest that
+`${...}` will resolve.
+
 Nothing is cached or published by a test, and it is recorded in the engine's
 event log against the user who ran it.
 
@@ -245,7 +250,10 @@ vault outage then stops the channels that depend on it.
 [Any secret by name](#any-secret-by-name-without-a-binding). Letters, digits and
 underscores, starting with a letter; it cannot be the variable prefix, another
 vault's reference name, or a name the engine itself puts into connector fields
-(`date`, `message`, `UUID` and the like).
+(`date`, `message`, `UUID` and the like). A new vault starts with one filled in
+for its provider -- `AWS`, `Azure`, `OnePassword` or `Bitwarden` -- unless that
+name is already taken. It is a suggestion, not a default: clear it before saving
+to require a binding for every secret. An existing vault is never given one.
 
 **Event log** — writes a warning into the engine's own event log when a secret
 cannot be read at all, where alerts can see it. Stale values are logged to the

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
     ref, navLabel, parseStatus, parseConnection, parseBinding,
     typeLabel, since, problemText, authModeHint, encodeMap, directRef, parseDirect,
+    suggestedPrefix, testerWarning,
 } from './logic.mjs';
 
 test('ref builds a Velocity placeholder by concatenation', () => {
@@ -106,4 +107,46 @@ test('encodeMap escapes and drops null/undefined', () => {
     assert.equal(encodeMap({ a: null, b: 'v' }),
         '<map><entry><string>b</string><string>v</string></entry></map>');
     assert.match(encodeMap({ k: 'a&b<c' }), /a&amp;b&lt;c/);
+});
+
+test('suggestedPrefix offers a name per provider, and nothing when it is taken', () => {
+    assert.equal(suggestedPrefix('AWS_SECRETS_MANAGER', []), 'AWS');
+    assert.equal(suggestedPrefix('AZURE_KEY_VAULT', ['keystore']), 'Azure');
+    assert.equal(suggestedPrefix('ONEPASSWORD_CONNECT'), 'OnePassword');
+    assert.equal(suggestedPrefix('BITWARDEN_SECRETS_MANAGER', []), 'Bitwarden');
+    // Taken by another vault, or by the bindings' variable prefix: no suggestion,
+    // since the server would refuse it.
+    assert.equal(suggestedPrefix('AWS_SECRETS_MANAGER', ['AWS', 'keystore']), '');
+    assert.equal(suggestedPrefix('AZURE_KEY_VAULT', ['Azure']), '');
+    assert.equal(suggestedPrefix('NOT_A_PROVIDER', []), '');
+});
+
+test('every suggested prefix is a name the server accepts', () => {
+    for (const type of ['AZURE_KEY_VAULT', 'AWS_SECRETS_MANAGER', 'ONEPASSWORD_CONNECT',
+        'BITWARDEN_SECRETS_MANAGER']) {
+        assert.match(suggestedPrefix(type, []), /^[A-Za-z][A-Za-z0-9_]*$/);
+    }
+});
+
+test('testerWarning flags a readable secret that channels cannot reach', () => {
+    const ok = { ok: true, masked: 'p**B', placeholder: '' };
+    const noPrefix = { name: 'AWS', enabled: true, referencePrefix: '' };
+    assert.match(testerWarning(noPrefix, ok), /"AWS" has no direct reference name/);
+    const off = { name: 'AWS', enabled: false, referencePrefix: 'AWS' };
+    assert.match(testerWarning(off, ok), /"AWS" is switched off/);
+    // Switched off wins: setting a reference name would not help.
+    assert.match(testerWarning({ name: 'v', enabled: false, referencePrefix: '' }, ok),
+        /switched off/);
+    // Falls back to the label when the vault has no name.
+    assert.match(testerWarning({ label: 'eu vault', enabled: true }, ok), /"eu vault"/);
+});
+
+test('testerWarning is silent when the secret is usable or nothing was read', () => {
+    const usable = { ok: true, placeholder: "${AWS['x'].apikey}" };
+    assert.equal(testerWarning({ name: 'AWS', enabled: true, referencePrefix: 'AWS' },
+        usable), null);
+    assert.equal(testerWarning({ name: 'AWS', enabled: true, referencePrefix: 'AWS' },
+        { ok: true, placeholder: '' }), null);
+    assert.equal(testerWarning(null, { ok: true }), null);
+    assert.equal(testerWarning({ name: 'AWS' }, null), null);
 });
