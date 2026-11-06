@@ -4,8 +4,8 @@
  *
  * Copied rather than imported, the same arrangement the Backup / Git Sync /
  * Volume Monitor extensions use. decode/decodeEntry/encodeMap/ref/directRef/
- * navLabel/parseStatus/parseConnection/parseDirect/parseBinding/typeLabel and
- * the TYPES table are
+ * navLabel/parseStatus/parseConnection/parseDirect/parseBinding/typeLabel/
+ * suggestedPrefix/testerWarning and the TYPES and SUGGESTED_PREFIX tables are
  * copied verbatim; problemText and authModeHint are lifted out of register()'s
  * closure unchanged. since() reads Date.now() in plugin.js; here it takes an
  * injected `now` so the thresholds are deterministic under test.
@@ -98,6 +98,32 @@ export function directRef(prefix, secretId, field) {
         out += /^[A-Za-z][A-Za-z0-9_]*$/.test(field) ? '.' + field : "['" + field + "']";
     }
     return out + '}';
+}
+
+export const SUGGESTED_PREFIX = {
+    AZURE_KEY_VAULT: 'Azure',
+    AWS_SECRETS_MANAGER: 'AWS',
+    ONEPASSWORD_CONNECT: 'OnePassword',
+    BITWARDEN_SECRETS_MANAGER: 'Bitwarden',
+};
+
+export function suggestedPrefix(type, taken) {
+    const name = SUGGESTED_PREFIX[type] || '';
+    return name && !(taken || []).includes(name) ? name : '';
+}
+
+export function testerWarning(connection, result) {
+    if (!connection || !result || result.placeholder) return null;
+    const name = connection.name || connection.label || 'this vault';
+    if (connection.enabled === false) {
+        return `Channels cannot read this secret: the vault "${name}" is switched off.`;
+    }
+    if (!connection.referencePrefix) {
+        return 'Channels cannot read this secret as ${…}: the vault "' + name + '" has '
+            + 'no direct reference name. Set one in the vault’s editor, or add a '
+            + 'binding for this secret.';
+    }
+    return null;
 }
 
 export function navLabel(boot) {

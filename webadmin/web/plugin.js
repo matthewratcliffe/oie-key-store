@@ -193,6 +193,49 @@ function directRef(prefix, secretId, field) {
     return out + '}';
 }
 
+/** The reference name a new vault of each provider is offered. */
+const SUGGESTED_PREFIX = {
+    AZURE_KEY_VAULT: 'Azure',
+    AWS_SECRETS_MANAGER: 'AWS',
+    ONEPASSWORD_CONNECT: 'OnePassword',
+    BITWARDEN_SECRETS_MANAGER: 'Bitwarden',
+};
+
+/**
+ * The reference name to pre-fill on a new vault, or '' when there is none to offer.
+ *
+ * A suggestion in a visible, clearable field -- not a default applied behind the
+ * operator's back, because a reference name lets any channel read any secret the
+ * identity can. Nothing is offered when the name is already taken (another vault's
+ * reference name, or the bindings' variable prefix): the server would refuse it, and
+ * offering "AWS2" instead is a guess nobody would recognise in a connector field.
+ */
+function suggestedPrefix(type, taken) {
+    const name = SUGGESTED_PREFIX[type] || '';
+    return name && !(taken || []).includes(name) ? name : '';
+}
+
+/**
+ * Why a secret the tester just read still cannot be used in a connector field, or
+ * null when it can.
+ *
+ * The test reads the vault directly, so it succeeds whether or not channels can see
+ * the secret; without this, a passing test reads as "the placeholder will work".
+ */
+function testerWarning(connection, result) {
+    if (!connection || !result || result.placeholder) return null;
+    const name = connection.name || connection.label || 'this vault';
+    if (connection.enabled === false) {
+        return `Channels cannot read this secret: the vault "${name}" is switched off.`;
+    }
+    if (!connection.referencePrefix) {
+        return 'Channels cannot read this secret as ${…}: the vault "' + name + '" has '
+            + 'no direct reference name. Set one in the vault’s editor, or add a '
+            + 'binding for this secret.';
+    }
+    return null;
+}
+
 function navLabel(boot) {
     if (!boot || boot.ok === false) return 'Key Store';
     const faults = Number(boot.faults) || 0;
@@ -982,6 +1025,10 @@ export function register(platform) {
                     ? h(ConnectionEditor, {
                         key: 'vault-editor',
                         initial: editingConnection,
+                        takenPrefixes: connections
+                            .filter(c => c.id !== editingConnection.id && c.referencePrefix)
+                            .map(c => c.referencePrefix)
+                            .concat(namespace),
                         onCancel: () => setEditingConnection(null),
                         onSaved: async (message) => {
                             setEditingConnection(null);
@@ -1121,9 +1168,23 @@ export function register(platform) {
     // ------------------------------------------------------------------
     function ConnectionEditor(props) {
         const initial = props.initial;
-        const [values, setValues] = React.useState(() => Object.assign({
-            name: '', type: 'AZURE_KEY_VAULT', authMode: 'CLIENT_SECRET', enabled: true,
-        }, initial));
+        const isNew = !initial.id;
+        const takenPrefixes = props.takenPrefixes || [];
+        const [values, setValues] = React.useState(() => {
+            const start = Object.assign({
+                name: '', type: 'AZURE_KEY_VAULT', authMode: 'CLIENT_SECRET', enabled: true,
+            }, initial);
+            // A new vault starts with a reference name filled in, in plain sight and
+            // clearable. An existing vault keeps what it has, empty included: that
+            // emptiness may be the operator's decision to require bindings.
+            if (isNew && start.referencePrefix === undefined) {
+                start.referencePrefix = suggestedPrefix(start.type, takenPrefixes);
+            }
+            return start;
+        });
+        // Once the operator has typed in the field, or cleared it, the suggestion
+        // stops following the provider: what they put there is theirs.
+        const [prefixTouched, setPrefixTouched] = React.useState(false);
         const [secrets, setSecrets] = React.useState({});
         const [showAdvanced, setShowAdvanced] = React.useState(false);
         const [busy, setBusy] = React.useState('');
@@ -1145,7 +1206,9 @@ export function register(platform) {
         const setType = next => setValues(v => Object.assign({}, v, {
             type: next,
             authMode: (AUTH_MODES[next] || [{}])[0].token,
-        }));
+        }, isNew && !prefixTouched
+            ? { referencePrefix: suggestedPrefix(next, takenPrefixes) }
+            : {}));
 
         const visibleFields = (FIELDS[type] || []).filter(field => {
             if (field.when && !field.when.includes(values.authMode)) return false;
@@ -1246,8 +1309,10 @@ export function register(platform) {
                             || field.key === 'connectUrl' })),
 
                     Field('Direct reference name',
-                        Text(values.referencePrefix, v => set('referencePrefix', v),
-                            { placeholder: 'AWS' }),
+                        Text(values.referencePrefix, v => {
+                            setPrefixTouched(true);
+                            set('referencePrefix', v);
+                        }, { placeholder: 'AWS' }),
                         values.referencePrefix
                             ? 'Any secret this identity can read is available by name as '
                               + directRef(values.referencePrefix, 'prod/db', 'password')
@@ -1313,7 +1378,7 @@ export function register(platform) {
                     setError(problemText(r));
                     return;
                 }
-                setResult(r);
+                setResult(Object.assign({}, r, { connection }));
             } catch (err) {
                 setError(err.message);
             } finally {
@@ -1354,6 +1419,11 @@ export function register(platform) {
                     : null,
                 result.note ? h('div', { key: 'n' }, result.note) : null,
             ], 'result') : null,
+            // Taken from the vault the result was read from, not the one now selected
+            // in the dropdown, so changing the dropdown afterwards cannot misattribute it.
+            result && testerWarning(result.connection, result)
+                ? Banner('warn', testerWarning(result.connection, result), 'unreachable')
+                : null,
             result && result.placeholder
                 ? h('div', { key: 'ph', style: { marginBottom: '9px' } }, [
                     h('span', { key: 'l', className: 'hint', style: { marginRight: '6px' } },
